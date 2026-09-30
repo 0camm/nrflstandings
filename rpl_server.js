@@ -496,6 +496,76 @@ async function handleRemoveResult(req, res) {
   return sendJSON(res, 200, { ok: true, removed });
 }
 
+
+function auditPush(entry) {
+  state.auditLog.unshift({ timestamp: new Date().toISOString(), ...entry });
+  if (state.auditLog.length > 200) state.auditLog.length = 200;
+}
+
+function normIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  return [...new Set(ids.filter(x => x !== undefined && x !== null && x !== "").map(String))];
+}
+
+async function handleBulkVoid(req, res) {
+  if (!isAdminAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
+  let body;
+  try { body = await readBody(req); }
+  catch (e) { return sendJSON(res, 400, { error: "Bad JSON" }); }
+
+  const ids = normIds(body.ids);
+  if (!ids.length) return sendJSON(res, 422, { error: "No game ids provided" });
+  const voided = !!body.voided;
+  const idSet = new Set(ids);
+
+  let changed = 0;
+  const missing = ids.filter(id => !state.results.some(r => String(r.id) === id));
+  for (const r of state.results) {
+    if (!idSet.has(String(r.id))) continue;
+    if (!!r.voided === voided) continue;
+    r.voided = voided;
+    changed++;
+    auditPush({
+      action: voided ? "voided" : "unvoided", gameId: r.id,
+      matchup: `${r.awayABB} @ ${r.homeABB}`, score: `${r.awayScore}–${r.homeScore}`, status: r.status,
+    });
+  }
+
+  state.lastUpdated = new Date().toISOString();
+  rebuildStandings();
+  await saveState();
+  broadcast("standings", buildPublicPayload());
+  console.log(`[RFL] Bulk ${voided ? "void" : "unvoid"}: ${changed} game(s)`);
+  return sendJSON(res, 200, { ok: true, changed, missing });
+}
+
+async function handleBulkRemove(req, res) {
+  if (!isAdminAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
+  let body;
+  try { body = await readBody(req); }
+  catch (e) { return sendJSON(res, 400, { error: "Bad JSON" }); }
+
+  const ids = normIds(body.ids);
+  if (!ids.length) return sendJSON(res, 422, { error: "No game ids provided" });
+  const idSet = new Set(ids);
+
+  const removed = state.results.filter(r => idSet.has(String(r.id)));
+  state.results = state.results.filter(r => !idSet.has(String(r.id)));
+  for (const r of removed) {
+    auditPush({
+      action: "removed", gameId: r.id,
+      matchup: `${r.awayABB} @ ${r.homeABB}`, score: `${r.awayScore}–${r.homeScore}`, status: r.status,
+    });
+  }
+
+  state.lastUpdated = new Date().toISOString();
+  rebuildStandings();
+  await saveState();
+  broadcast("standings", buildPublicPayload());
+  console.log(`[RFL] Bulk remove: ${removed.length} game(s)`);
+  return sendJSON(res, 200, { ok: true, removed: removed.length });
+}
+
 async function handleZeroRecords(req, res) {
   if (!isAdminAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
 
@@ -690,31 +760,52 @@ async function handleAddTeam(req, res) {
   return sendJSON(res, 200, { ok: true, team: { abb, ...state.teams[abb] } });
 }
 
+// Remove one or more teams. Because rebuildStandings() re-creates any team that still
+// appears in a non-voided result, games involving a removed team are voided (default,
+// reversible) or deleted, otherwise the team would reappear on the next rebuild.
 async function handleRemoveTeam(req, res) {
   if (!isAdminAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
   let body;
   try { body = await readBody(req); }
   catch (e) { return sendJSON(res, 400, { error: "Bad JSON" }); }
 
-  const abb = sanitizeStr(body.abb, 8).toUpperCase();
-  if (!abb) return sendJSON(res, 422, { error: "Missing abb" });
-  if (!state.teams[abb]) return sendJSON(res, 404, { error: `Team "${abb}" doesn't exist.` });
+  const rawList = Array.isArray(body.abbs) ? body.abbs : (body.abb !== undefined ? [body.abb] : []);
+  const abbs = [...new Set(rawList.map(a => sanitizeStr(a, 8).toUpperCase()).filter(Boolean))];
+  if (!abbs.length) return sendJSON(res, 422, { error: "Missing abb" });
 
-  const removedName = state.teams[abb].name || abb;
-  delete state.teams[abb];
+  const existing = abbs.filter(a => state.teams[a]);
+  const missing  = abbs.filter(a => !state.teams[a]);
+  if (!existing.length) return sendJSON(res, 404, { error: `Team${abbs.length > 1 ? "s" : ""} not found: ${abbs.join(", ")}` });
+
+  const gameAction = ["void", "delete", "keep"].includes(body.gameAction) ? body.gameAction : "void";
+  const gone = new Set(existing);
+  const involves = r => gone.has(r.homeABB) || gone.has(r.awayABB);
+
+  let gamesVoided = 0, gamesDeleted = 0;
+  if (gameAction === "delete") {
+    const before = state.results.length;
+    state.results = state.results.filter(r => !involves(r));
+    gamesDeleted = before - state.results.length;
+  } else if (gameAction === "void") {
+    for (const r of state.results) {
+      if (involves(r) && !r.voided) { r.voided = true; gamesVoided++; }
+    }
+  }
+
+  for (const abb of existing) {
+    const removedName = state.teams[abb].name || abb;
+    delete state.teams[abb];
+    auditPush({ action: "team_removed", gameId: null, matchup: `${abb} — ${removedName}`, score: "—", status: "" });
+  }
+
   state.lastUpdated = new Date().toISOString();
-
+  // "keep" leaves games untouched and skips rebuild so the removal sticks until the next rebuild.
+  if (gameAction !== "keep") rebuildStandings();
   await saveState();
   broadcast("standings", buildPublicPayload());
 
-  state.auditLog.unshift({
-    action: "team_removed", gameId: null, matchup: `${abb} — ${removedName}`,
-    score: "—", status: "", timestamp: new Date().toISOString(),
-  });
-  if (state.auditLog.length > 200) state.auditLog.length = 200;
-
-  console.log(`[RFL] Team removed manually: ${abb} (${removedName})`);
-  return sendJSON(res, 200, { ok: true, abb });
+  console.log(`[RFL] Team(s) removed: ${existing.join(", ")} | games voided=${gamesVoided} deleted=${gamesDeleted}`);
+  return sendJSON(res, 200, { ok: true, abb: existing[0], removed: existing, missing, gamesVoided, gamesDeleted });
 }
 
 function buildPublicPayload() {
@@ -1076,6 +1167,8 @@ const server = http.createServer(async (req, res) => {
   if (url === "/rpl/standings/statlog"  && method === "GET")  return handleGetStatLog(req, res);
   if (url === "/rpl/standings/void"     && method === "POST") return handleVoidResult(req, res);
   if (url === "/rpl/standings/remove"   && method === "POST") return handleRemoveResult(req, res);
+  if (url === "/rpl/standings/void/bulk"   && method === "POST") return handleBulkVoid(req, res);
+  if (url === "/rpl/standings/remove/bulk" && method === "POST") return handleBulkRemove(req, res);
   if (url === "/rpl/standings/reset"    && method === "POST") return handleReset(req, res);
   if (url === "/rpl/standings/add"      && method === "POST") return handleAddGame(req, res);
   if (url === "/rpl/standings/auditlog" && method === "GET")  return handleGetAuditLog(req, res);

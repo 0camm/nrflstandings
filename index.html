@@ -585,9 +585,23 @@ select.fc{
 .panel-msg.success{background:var(--gr-d);border:1px solid rgba(28,122,62,.22);color:var(--gr)}
 .panel-msg.error{background:var(--bad-d);border:1px solid var(--bad-mid);color:var(--bad)}
 
+/* bulk selection */
+.bulk-cb{width:18px;height:18px;accent-color:var(--acc);cursor:pointer;flex-shrink:0;margin:0}
+.gp-row.checked{background:var(--acc-dim);border-color:var(--acc-edge)}
+.bulk-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.bulk-bar .bulk-count{font-size:11px;font-weight:700;color:var(--navy);margin-right:auto;padding:0 2px}
+.bulk-mini{background:var(--s2);border:1px solid var(--b);border-radius:999px;padding:5px 11px;font-size:11px;font-weight:600;color:var(--tx);cursor:pointer;font-family:inherit}
+.bulk-mini:hover{border-color:var(--acc-edge)}
+.bulk-mini:disabled{opacity:.4;cursor:not-allowed}
+.bulk-mini.danger{color:var(--danger);border-color:rgba(179,38,30,.3);background:var(--danger-d)}
+.bulk-mini.ok{color:var(--gr);border-color:rgba(28,122,62,.3);background:var(--gr-d)}
+.bulk-sel{background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:5px 8px;font-size:11px;color:var(--tx);font-family:inherit}
+.srow-x{position:absolute;right:6px;top:6px;width:22px;height:22px;border-radius:50%;border:1px solid rgba(179,38,30,.35);background:var(--danger-d);color:var(--danger);font-size:13px;line-height:1;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;z-index:3}
+.srow-x:hover{background:rgba(179,38,30,.22)}
+
 /* game picker */
 .gp-row{
-  display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;
+  display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;
   padding:7px 10px;border-radius:6px;border:1px solid var(--b);background:var(--s1);
   cursor:pointer;transition:background .1s,border-color .1s;
 }
@@ -1240,13 +1254,27 @@ select.fc{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <div class="admin-section-hd">
           <div class="admin-section-icon blue">🔍</div>
           <div>
-            <div class="admin-section-label">Find Game</div>
-            <div class="admin-section-desc">Search and click a game to auto-fill the ID below.</div>
+            <div class="admin-section-label">Find &amp; Manage Games</div>
+            <div class="admin-section-desc">Tick the checkboxes to select multiple games, then void, restore or delete them all at once. Clicking a row (not the checkbox) still auto-fills the single-game ID fields.</div>
           </div>
         </div>
         <div class="admin-section-body" style="padding-bottom:8px">
-          <input class="field-input" type="text" id="gp-search" placeholder="Search team (e.g. KC, SF)…" autocomplete="off" spellcheck="false" style="width:100%;margin-bottom:8px">
-          <div id="gp-list" style="display:flex;flex-direction:column;gap:3px;max-height:220px;overflow-y:auto"></div>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input class="field-input" type="text" id="gp-search" placeholder="Search team (e.g. KC, SF)…" autocomplete="off" spellcheck="false" style="flex:1;min-width:0">
+            <select class="bulk-sel" id="gp-filter"><option value="all">All</option><option value="active">Active</option><option value="voided">Voided</option></select>
+          </div>
+          <div class="bulk-bar">
+            <span class="bulk-count" id="gp-sel-count">0 selected</span>
+            <button type="button" class="bulk-mini" id="gp-sel-all">Select shown</button>
+            <button type="button" class="bulk-mini" id="gp-sel-none">Clear</button>
+          </div>
+          <div class="bulk-bar">
+            <button type="button" class="bulk-mini danger" id="gp-bulk-void" disabled>Void selected</button>
+            <button type="button" class="bulk-mini ok" id="gp-bulk-unvoid" disabled>Restore selected</button>
+            <button type="button" class="bulk-mini danger" id="gp-bulk-remove" disabled>Delete selected</button>
+          </div>
+          <div class="panel-msg" id="gp-bulk-msg" style="margin-top:0;margin-bottom:8px"></div>
+          <div id="gp-list" style="display:flex;flex-direction:column;gap:3px;max-height:340px;overflow-y:auto"></div>
         </div>
       </div>
       <!-- Add Game -->
@@ -1305,6 +1333,20 @@ select.fc{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         </div>
         <div class="admin-section-body">
           <input class="field-input" type="text" id="tm-search" placeholder="Search by name, abbreviation, or conference…" autocomplete="off" spellcheck="false" style="width:100%;margin-bottom:10px">
+          <div class="bulk-bar">
+            <span class="bulk-count" id="tm-sel-count">0 selected</span>
+            <button type="button" class="bulk-mini" id="tm-sel-all">Select shown</button>
+            <button type="button" class="bulk-mini" id="tm-sel-none">Clear</button>
+            <button type="button" class="bulk-mini danger" id="tm-bulk-remove" disabled>Remove selected</button>
+          </div>
+          <div class="bulk-bar" style="margin-top:-2px">
+            <span style="font-size:11px;color:var(--mu)">Their games:</span>
+            <select class="bulk-sel" id="tm-game-action">
+              <option value="void">Void them (reversible)</option>
+              <option value="delete">Delete them permanently</option>
+            </select>
+          </div>
+          <div class="panel-msg" id="tm-bulk-msg" style="margin-top:0;margin-bottom:8px"></div>
           <div id="tm-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto"></div>
         </div>
       </div>
@@ -1529,7 +1571,7 @@ async function rSet(d){
   }catch(e){return{ok:false,error:e.message||'Network error'};}
 }
 
-let prevData=null,fails=0,lastId=null,allResults=[],pg=1,currentView='standings';
+let prevData=null,rawTeams=[],fails=0,lastId=null,allResults=[],pg=1,currentView='standings';
 let adminUnlocked=false,adminPassword='',currentAdminTab='games';
 let ARCHIVE=[],lastStandingsSnapshot=null,lastRefsSnapshot=null;
 
@@ -1718,6 +1760,7 @@ const strk=raw=>!raw||raw==='—'?`<span class="rstrk n">—</span>`:`<span clas
 
 function renderConfs(data){
   const el=document.getElementById('conferences');
+  if(Array.isArray(data.standings))rawTeams=data.standings;
   const sd=Array.isArray(data.standings)?flatToConfs(data.standings):(data.standings||{eastern:[],western:[]});
   const changed=new Set();
   if(prevData){
@@ -1736,7 +1779,9 @@ function renderConfs(data){
     const rows=teams.map((t,i)=>{
       const sc=t.status||'e',fl=changed.has(t.abbr)?' flash':'';
       const cut=(i===6||i===10)?' cut':'';
+      const xbtn=adminUnlocked?`<button type="button" class="srow-x" data-std-del="${t.abbr}" title="Remove ${t.abbr} from standings" aria-label="Remove ${t.abbr}">×</button>`:'';
       return`<div class="srow s-${sc}${fl}${cut}">
+        ${xbtn}
         <span class="rrank">${i+1}</span>
         <span class="rlogo">${logoImg(t.rawLogo,t.abbr,'rlogo-img',32)}</span>
         <span class="rteam">
@@ -1761,6 +1806,7 @@ function renderConfs(data){
       </div>
     </div>`;
   }).join('');
+  el.querySelectorAll('[data-std-del]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();tmDeleteTeam(b.dataset.stdDel)}));
   setTimeout(()=>document.querySelectorAll('.srow.flash').forEach(r=>r.classList.remove('flash')),1900);
   prevData=JSON.parse(JSON.stringify(sd));
   lastStandingsSnapshot=sd;
@@ -1990,6 +2036,7 @@ async function unlockAdmin(){
     document.getElementById('admin-sub-text').textContent='Changes apply instantly to the live site.';
     renderGamePicker('');
     loadAuditLog();
+    fetchData(); // re-render standings with admin remove buttons
     document.getElementById('arc-season-label').value=document.querySelector('.hero-eyebrow')?.textContent.split('·')[0].trim()||'';
   }catch(e){toast('Network error — could not verify password','red',3000);}
   finally{btn.textContent='Unlock';btn.disabled=false;}
@@ -2007,22 +2054,41 @@ function switchAdminTab(tab,btn){
   if(tab==='archive')renderAdminArchiveList();
 }
 
-/* ── GAME PICKER ── */
+/* ── GAME PICKER (with multi-select) ── */
+const gpSelected=new Set();
+let gpShown=[];
+const gpBulkBtns=['gp-bulk-void','gp-bulk-unvoid','gp-bulk-remove'];
+function gpUpdateBar(){
+  const n=gpSelected.size;
+  document.getElementById('gp-sel-count').textContent=`${n} selected`;
+  gpBulkBtns.forEach(id=>document.getElementById(id).disabled=n===0);
+}
 function renderGamePicker(q){
   const list=document.getElementById('gp-list');
   if(!list)return;
+  if(q===undefined)q=document.getElementById('gp-search').value;
   const sq=(q||'').trim().toLowerCase();
+  const filt=document.getElementById('gp-filter').value;
+  // drop selections for games that no longer exist
+  const liveIds=new Set(allResults.map(g=>String(g.id)));
+  [...gpSelected].forEach(id=>{if(!liveIds.has(id))gpSelected.delete(id)});
   const src=allResults.filter(g=>{
+    if(filt==='active'&&g.voided)return false;
+    if(filt==='voided'&&!g.voided)return false;
     if(!sq)return true;
     return(g.awayABB||'').toLowerCase().includes(sq)||(g.homeABB||'').toLowerCase().includes(sq);
-  }).slice(0,40);
+  }).slice(0,300);
+  gpShown=src;
+  gpUpdateBar();
   if(!src.length){list.innerHTML=`<div class="gp-empty">No games found.</div>`;return}
   const fmtDT=iso=>{if(!iso)return'—';const d=new Date(iso);if(isNaN(d))return'—';return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})};
   list.innerHTML=src.map((g,i)=>{
     const st=effStatus(g);
     const sc=(g.homeScore??'—')+' – '+(g.awayScore??'—');
     const badge=g.voided?'voided':st;
-    return`<div class="gp-row" data-gp-i="${i}" tabindex="0" role="button">
+    const on=gpSelected.has(String(g.id));
+    return`<div class="gp-row${on?' checked':''}" data-gp-i="${i}" tabindex="0" role="button">
+      <input type="checkbox" class="bulk-cb" ${on?'checked':''} aria-label="Select game ${g.id}">
       <div>
         <div class="gp-matchup">${g.awayABB||'?'} @ ${g.homeABB||'?'}</div>
         <div class="gp-meta">
@@ -2037,6 +2103,12 @@ function renderGamePicker(q){
   }).join('');
   list.querySelectorAll('.gp-row').forEach((el,i)=>{
     const g=src[i];
+    const cb=el.querySelector('.bulk-cb');
+    const toggle=on=>{
+      if(on)gpSelected.add(String(g.id));else gpSelected.delete(String(g.id));
+      el.classList.toggle('checked',on);cb.checked=on;gpUpdateBar();
+    };
+    cb.addEventListener('click',e=>{e.stopPropagation();toggle(cb.checked)});
     const pick=()=>{
       list.querySelectorAll('.gp-row').forEach(r=>r.classList.remove('selected'));
       el.classList.add('selected');
@@ -2045,10 +2117,56 @@ function renderGamePicker(q){
       clearPanelMsg('void-msg');clearPanelMsg('remove-msg');
     };
     el.addEventListener('click',pick);
-    el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')pick()});
+    el.addEventListener('keydown',e=>{
+      if(e.target!==el)return;
+      if(e.key==='Enter')pick();
+      else if(e.key===' '){e.preventDefault();toggle(!cb.checked)}
+    });
   });
 }
 document.getElementById('gp-search').addEventListener('input',e=>renderGamePicker(e.target.value));
+document.getElementById('gp-filter').addEventListener('change',()=>renderGamePicker());
+document.getElementById('gp-sel-all').addEventListener('click',()=>{gpShown.forEach(g=>gpSelected.add(String(g.id)));renderGamePicker()});
+document.getElementById('gp-sel-none').addEventListener('click',()=>{gpSelected.clear();renderGamePicker()});
+
+async function gpBulk(kind){
+  clearPanelMsg('gp-bulk-msg');
+  const ids=[...gpSelected];
+  if(!ids.length)return;
+  const games=ids.map(id=>allResults.find(g=>String(g.id)===id)).filter(Boolean);
+  const preview=games.slice(0,8).map(g=>`  • ${g.awayABB} @ ${g.homeABB} (${g.awayScore}–${g.homeScore})`).join('\n')+(games.length>8?`\n  …and ${games.length-8} more`:'');
+  const cfg={
+    void:{path:'/standings/void/bulk',body:{voided:true},verb:'Void',done:'voided',
+      msg:`Void ${ids.length} game${ids.length!==1?'s':''}?\n\n${preview}\n\nThey're excluded from standings but stay in history marked as voided.`},
+    unvoid:{path:'/standings/void/bulk',body:{voided:false},verb:'Restore',done:'restored',
+      msg:`Restore ${ids.length} game${ids.length!==1?'s':''}?\n\n${preview}\n\nThey'll count in standings again.`},
+    remove:{path:'/standings/remove/bulk',body:{},verb:'Delete',done:'deleted',
+      msg:`PERMANENTLY delete ${ids.length} game${ids.length!==1?'s':''}?\n\n${preview}\n\nThis cannot be undone.`},
+  }[kind];
+  if(!confirm(cfg.msg))return;
+  gpBulkBtns.forEach(id=>document.getElementById(id).disabled=true);
+  try{
+    const r=await fetch(CFG.API.replace(/\/standings$/,cfg.path),{
+      method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${adminPassword}`},
+      body:JSON.stringify({ids,...cfg.body})
+    });
+    let data=null;try{data=await r.json();}catch(_){}
+    if(!r.ok)throw new Error(data?.error?`${data.error} (HTTP ${r.status})`:`Server error ${r.status}`);
+    const n=data.changed??data.removed??ids.length;
+    showPanelMsg('gp-bulk-msg',`✓ ${n} game${n!==1?'s':''} ${cfg.done}.`,'success');
+    toast(`${n} game${n!==1?'s':''} ${cfg.done}`,kind==='unvoid'?'green':'amber',4000);
+    gpSelected.clear();
+    await fetchData();
+    renderGamePicker();
+    loadAuditLog();
+  }catch(e){
+    showPanelMsg('gp-bulk-msg',e.message||'Failed.','error');
+    gpUpdateBar();
+  }
+}
+document.getElementById('gp-bulk-void').addEventListener('click',()=>gpBulk('void'));
+document.getElementById('gp-bulk-unvoid').addEventListener('click',()=>gpBulk('unvoid'));
+document.getElementById('gp-bulk-remove').addEventListener('click',()=>gpBulk('remove'));
 
 /* ── ADD GAME ── */
 // Choosing "Tie": mirror whichever score was typed into the other box so the two always match.
@@ -2130,7 +2248,7 @@ function tmClearForm(){
 document.getElementById('tm-clear-btn').addEventListener('click',tmClearForm);
 
 function tmLoadTeam(abb){
-  const t=prevData&&prevData.standings?prevData.standings.find(x=>x.abb===abb):null;
+  const t=rawTeams.find(x=>x.abb===abb)||null;
   if(!t)return;
   tmMode='edit';tmOriginalAbb=abb;
   document.getElementById('tm-form-icon').textContent='✎';
@@ -2154,11 +2272,19 @@ function tmLoadTeam(abb){
   document.getElementById('tm-abb').scrollIntoView({block:'center',behavior:'smooth'});
 }
 
+const tmSelected=new Set();
+let tmShown=[];
+function tmUpdateBar(){
+  const live=new Set(rawTeams.map(t=>t.abb));
+  [...tmSelected].forEach(a=>{if(!live.has(a))tmSelected.delete(a)});
+  document.getElementById('tm-sel-count').textContent=`${tmSelected.size} selected`;
+  document.getElementById('tm-bulk-remove').disabled=tmSelected.size===0;
+}
 function renderTeamsList(){
   const wrap=document.getElementById('tm-list');
   if(!wrap)return;
   const q=(document.getElementById('tm-search').value||'').trim().toLowerCase();
-  const teams=(prevData&&prevData.standings?[...prevData.standings]:[]).sort((a,b)=>(a.name||a.abb).localeCompare(b.name||b.abb));
+  const teams=[...rawTeams].sort((a,b)=>(a.name||a.abb).localeCompare(b.name||b.abb));
   const filtered=teams.filter(t=>{
     if(!q)return true;
     return(t.abb||'').toLowerCase().includes(q)||(t.name||'').toLowerCase().includes(q)||(t.conference||'').toLowerCase().includes(q);
@@ -2169,6 +2295,7 @@ function renderTeamsList(){
     const nameLabel=t.name||'<span style="color:var(--mu2)">Unnamed — needs setup</span>';
     const confLabel=t.conference?`<span class="rbadge" style="background:var(--s3);color:var(--tx2)">${t.conference}</span>`:'<span class="rbadge" style="background:var(--bad-d);color:var(--bad)">No conference</span>';
     return`<div style="display:flex;align-items:center;gap:10px;border:1px solid var(--b);border-radius:8px;padding:9px 10px;background:var(--s1)">
+      <input type="checkbox" class="bulk-cb" data-tm-cb="${t.abb}" ${tmSelected.has(t.abb)?'checked':''} aria-label="Select ${t.abb}">
       ${lg?`<img src="${lg}" alt="" style="width:30px;height:30px;object-fit:contain;flex-shrink:0">`:'<div style="width:30px;height:30px;border-radius:6px;background:var(--s3);flex-shrink:0"></div>'}
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nameLabel} <span style="color:var(--mu);font-weight:500">(${t.abb})</span></div>
@@ -2180,6 +2307,12 @@ function renderTeamsList(){
       </div>
     </div>`;
   }).join('');
+  wrap.querySelectorAll('[data-tm-cb]').forEach(cb=>cb.addEventListener('change',()=>{
+    if(cb.checked)tmSelected.add(cb.dataset.tmCb);else tmSelected.delete(cb.dataset.tmCb);
+    tmUpdateBar();
+  }));
+  tmShown=filtered.map(t=>t.abb);
+  tmUpdateBar();
   wrap.querySelectorAll('[data-tm-edit]').forEach(btn=>btn.addEventListener('click',()=>tmLoadTeam(btn.dataset.tmEdit)));
   wrap.querySelectorAll('[data-tm-del]').forEach(btn=>btn.addEventListener('click',()=>tmDeleteTeam(btn.dataset.tmDel)));
 }
@@ -2239,22 +2372,48 @@ document.getElementById('tm-save-btn').addEventListener('click',async()=>{
 });
 
 async function tmDeleteTeam(abb){
-  const t=prevData&&prevData.standings?prevData.standings.find(x=>x.abb===abb):null;
+  const t=rawTeams.find(x=>x.abb===abb)||null;
   const label=t?.name?`${t.name} (${abb})`:abb;
-  if(!confirm(`PERMANENTLY remove ${label}?\n\nThis deletes the team's name, conference, logo, and roles entirely. Past game history stays in the archive, but this team disappears from the standings until an admin re-adds it.\n\nThis cannot be undone.`))return;
+  if(!confirm(`PERMANENTLY remove ${label}?\n\nThis deletes the team's name, conference, logo, and roles entirely. Their games will be voided (reversible from the games list) so the team doesn't reappear.\n\nThe team disappears from the standings until an admin re-adds it. This cannot be undone.`))return;
   try{
-    const r=await fetch(CFG.API.replace(/\/standings$/,'/standings/team/remove'),{
-      method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${adminPassword}`},
-      body:JSON.stringify({abb})
-    });
-    let data=null;try{data=await r.json();}catch(_){}
-    if(!r.ok)throw new Error(data?.error?`${data.error} (HTTP ${r.status})`:`Server error ${r.status}`);
+    await removeTeams([abb],'void');
     toast(`Team removed: ${abb}`,'amber',4000);
+    tmSelected.delete(abb);
     await fetchData();
-    renderTeamsList();
+    renderTeamsList();renderGamePicker();
     if(tmOriginalAbb===abb)tmClearForm();
   }catch(e){toast(`Failed to remove ${abb}: ${e.message||'unknown error'}`,'red',5000)}
 }
+
+async function removeTeams(abbs,gameAction){
+  const r=await fetch(CFG.API.replace(/\/standings$/,'/standings/team/remove'),{
+    method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${adminPassword}`},
+    body:JSON.stringify({abbs,gameAction})
+  });
+  let data=null;try{data=await r.json();}catch(_){}
+  if(!r.ok)throw new Error(data?.error?`${data.error} (HTTP ${r.status})`:`Server error ${r.status}`);
+  return data;
+}
+document.getElementById('tm-sel-all').addEventListener('click',()=>{tmShown.forEach(a=>tmSelected.add(a));renderTeamsList()});
+document.getElementById('tm-sel-none').addEventListener('click',()=>{tmSelected.clear();renderTeamsList()});
+document.getElementById('tm-bulk-remove').addEventListener('click',async()=>{
+  clearPanelMsg('tm-bulk-msg');
+  const abbs=[...tmSelected];
+  if(!abbs.length)return;
+  const gameAction=document.getElementById('tm-game-action').value;
+  const gtxt=gameAction==='delete'?'All games involving them will be PERMANENTLY DELETED.':'All games involving them will be voided (you can restore those later from the games list).';
+  if(!confirm(`PERMANENTLY remove ${abbs.length} team${abbs.length!==1?'s':''}?\n\n${abbs.join(', ')}\n\n${gtxt}\n\nThe teams disappear from the standings until an admin re-adds them. This cannot be undone.`))return;
+  const btn=document.getElementById('tm-bulk-remove');btn.disabled=true;
+  try{
+    const d=await removeTeams(abbs,gameAction);
+    const n=(d.removed||[]).length;
+    showPanelMsg('tm-bulk-msg',`✓ Removed ${n} team${n!==1?'s':''}${d.gamesVoided?` · ${d.gamesVoided} game${d.gamesVoided!==1?'s':''} voided`:''}${d.gamesDeleted?` · ${d.gamesDeleted} game${d.gamesDeleted!==1?'s':''} deleted`:''}.`,'success');
+    toast(`Removed ${n} team${n!==1?'s':''}`,'amber',4000);
+    tmSelected.clear();
+    if(tmOriginalAbb&&abbs.includes(tmOriginalAbb))tmClearForm();
+    await fetchData();renderTeamsList();renderGamePicker();
+  }catch(e){showPanelMsg('tm-bulk-msg',e.message||'Failed.','error');btn.disabled=false}
+});
 
 document.getElementById('tm-delete-btn').addEventListener('click',()=>{
   if(tmOriginalAbb)tmDeleteTeam(tmOriginalAbb);
@@ -2331,7 +2490,7 @@ document.getElementById('remove-btn').addEventListener('click',async()=>{
 /* ── ZERO ALL RECORDS (keeps team roster/logos) ── */
 document.getElementById('modal-zero').addEventListener('click',async()=>{
   clearPanelMsg('zero-msg');
-  const teamCt=(prevData&&prevData.standings)?prevData.standings.length:0;
+  const teamCt=rawTeams.length;
   if(!confirm(`This will set ALL ${teamCt} teams to 0-0, reset every streak, and permanently delete all match history.\n\nYour team roster and logos will be KEPT — you will not need to re-add teams.\n\nThis does NOT save anything to the Archive. If you want a permanent record of this season first, cancel and use Season → Archive Current Season instead.\n\nThis cannot be undone. Continue?`))return;
   const btn=document.getElementById('modal-zero');
   btn.disabled=true;btn.textContent='Zeroing…';
@@ -2415,9 +2574,10 @@ async function fetchData(){
       }
       if(!lastId)lastId=data.results[0]?.id;
     }
-    const nids=(data.results||[]).map(r=>r.id).join(',');
-    if(nids!==allResults.map(r=>r.id).join(',')){allResults=data.results||[];if(currentView==='history')renderHistory()}
+    const sig=arr=>(arr||[]).map(r=>r.id+(r.voided?'v':'')).join(',');
+    if(sig(data.results)!==sig(allResults)){allResults=data.results||[];if(currentView==='history')renderHistory();if(adminUnlocked)renderGamePicker()}
     renderConfs(data);
+    if(adminUnlocked&&currentAdminTab==='teams')renderTeamsList();
   }catch(err){
     fails++;
     if(fails>=3){setLive(false);const a=document.getElementById('alert');a.textContent=`⚠ Standings server unreachable — showing last known data. (${err.message})`;a.classList.add('on')}
