@@ -842,7 +842,16 @@ async function handleSetArchive(req, res) {
 
 
 // ───────────────────────── Discord + stat audit helpers ─────────────────────────
-const STAT_FIELDS = ["pts","ast","reb","stl","blk","fgm","fga","ftm","fta","threeM","threeA","to","pf","grade"];
+// Stat keys come from the Roblox game (ReplicatedStorage.FootballStats.Config.Stats). Yard stats may be negative.
+const FB_STATS = {
+  Passing:   [["Comp","CMP"],["Att","ATT"],["PassYds","YDS"],["PassTD","TD"],["INT","INT"]],
+  Rushing:   [["RushAtt","ATT"],["RushYds","YDS"],["RushTD","TD"]],
+  Receiving: [["Rec","REC"],["RecYds","YDS"],["RecTD","TD"]],
+  Defense:   [["Tackles","TKL"],["Sacks","SCK"],["DefINT","INT"],["PBU","PBU"],["FF","FF"]],
+  Misc:      [["Fumbles","FUM"]],
+};
+const FB_KEYS = Object.values(FB_STATS).flat().map(x => x[0]);
+const YARD_KEYS = new Set(["PassYds","RushYds","RecYds"]);
 
 function postWebhook(url, payload) {
   return new Promise(resolve => {
@@ -862,42 +871,49 @@ function postWebhook(url, payload) {
     req.write(body); req.end();
   });
 }
+async function postWebhookRetry(url, payload) {
+  let res = await postWebhook(url, payload);
+  if (res.status === 429) {
+    await new Promise(r => setTimeout(r, Math.min(10, parseFloat(res.retryAfter) || 2) * 1000));
+    res = await postWebhook(url, payload);
+  }
+  return res;
+}
 
-function pad(v, n) { return String(v ?? 0).padStart(n); }
-function statTable(stats) {
-  if (!Array.isArray(stats) || !stats.length) return "No player stats recorded";
-  const head = "Player".padEnd(16) + "PTS AST REB STL BLK FG   3P   FT   TO PF GRD";
-  const rows = stats.map(p => {
-    const nm = String(p.name || "?").slice(0, 15).padEnd(16);
-    return nm + [pad(p.pts,3),pad(p.ast,3),pad(p.reb,3),pad(p.stl,3),pad(p.blk,3)].join(" ") + " " +
-      `${p.fgm ?? 0}/${p.fga ?? 0}`.padEnd(5) + `${p.threeM ?? 0}/${p.threeA ?? 0}`.padEnd(5) +
-      `${p.ftm ?? 0}/${p.fta ?? 0}`.padEnd(5) + [pad(p.to,2),pad(p.pf,2),pad(p.grade,3)].join(" ");
-  });
-  return [head, ...rows].join("\n");
+function statTables(players) {
+  // One small table per stat category, only players who have a non-zero stat in it.
+  const out = [];
+  for (const [group, cols] of Object.entries(FB_STATS)) {
+    const rows = players.filter(p => cols.some(([k]) => (p.stats[k] || 0) !== 0));
+    if (!rows.length) continue;
+    const head = "Player".padEnd(16) + cols.map(([, l]) => l.padStart(5)).join("");
+    const lines = rows.map(p => String(p.name).slice(0, 15).padEnd(16) + cols.map(([k]) => String(p.stats[k] || 0).padStart(5)).join(""));
+    out.push({ group, text: [head, ...lines].join("\n") });
+  }
+  return out;
 }
 
 async function sendFinalToGameFeed(r) {
-  const label = r.status === "forfeit" ? "FORFEIT" : (r.status === "tie" ? "TIE" : (r.quarter === "OT" ? "FINAL/OT" : "FINAL"));
-  const potg = r.playerOfGame;
+  const label = r.status === "incomplete" ? "INCOMPLETE (standings NOT updated)"
+    : r.status === "tie" ? "FINAL — TIE" : (r.quarter === "OT" ? "FINAL/OT" : "FINAL");
+  const homeName = r.homeName || r.homeABB, awayName = r.awayName || r.awayABB;
   const embeds = [{
-    title: `${label}: ${r.awayABB} ${r.awayScore} @ ${r.homeABB} ${r.homeScore}`,
+    title: `${label}: ${awayName} ${r.awayScore} @ ${homeName} ${r.homeScore}`,
     description: [
-      r.winnerABB ? `Winner: **${r.winnerABB}**` : "Result: **Tie**",
-      `Season: ${r.season}`, `Game ID: ${r.id}`,
-      r.referees && r.referees !== "None" ? `Referee(s): ${r.referees}` : null,
-      potg ? `Player of the Game: **${potg.name}** (${potg.team || "?"}) — ${["pts","ast","reb","stl","blk"].map(k => `${potg[k] ?? 0} ${k.toUpperCase()}`).join(", ")}` : null,
+      r.status === "tie" ? "Result: **Tie**" : (r.winnerABB ? `Winner: **${r.winnerABB}**` : null),
+      `Away: ${r.awayABB} (${awayName}) — ${r.awayScore}`,
+      `Home: ${r.homeABB} (${homeName}) — ${r.homeScore}`,
+      `Ended: ${r.endReason || "—"}`, `Game ID: ${r.gameKey}`,
     ].filter(Boolean).join("\n"),
     timestamp: r.timestamp,
   }];
-  for (const [abb, stats] of [[r.awayABB, r.awayStats], [r.homeABB, r.homeStats]]) {
-    // Split long tables so we stay under Discord's 4096-char description limit.
-    const lines = statTable(stats).split("\n"); const head = lines.shift();
-    let chunk = [head], first = true;
-    const flush = () => { embeds.push({ title: first ? `${abb} — player stats` : `${abb} — player stats (cont.)`, description: "```\n" + chunk.join("\n") + "\n```" }); first = false; };
-    for (const ln of lines) { if (chunk.join("\n").length + ln.length > 3800) { flush(); chunk = [head]; } chunk.push(ln); }
-    flush();
+  for (const [abb, name, players] of [[r.awayABB, awayName, r.awayStats], [r.homeABB, homeName, r.homeStats]]) {
+    if (!players.length) { embeds.push({ title: `${abb} — ${name}`, description: "No player stats recorded" }); continue; }
+    for (const [i, t] of statTables(players).entries()) {
+      embeds.push({ title: i === 0 ? `${abb} — ${name} · ${t.group}` : `${abb} · ${t.group}`, description: "```\n" + t.text.slice(0, 3800) + "\n```" });
+    }
   }
-  // Discord: max 10 embeds and 6000 total chars per message.
+  // Discord limits: 10 embeds and 6000 characters per message.
   const messages = []; let cur = [], curLen = 0;
   for (const e of embeds) {
     const len = (e.title || "").length + (e.description || "").length;
@@ -906,54 +922,30 @@ async function sendFinalToGameFeed(r) {
   }
   if (cur.length) messages.push(cur);
   for (const m of messages) {
-    let res = await postWebhook(GAMEFEED_WEBHOOK, { embeds: m, allowed_mentions: { parse: [] } });
-    if (res.status === 429) { await new Promise(r2 => setTimeout(r2, Math.min(10, parseFloat(res.retryAfter) || 2) * 1000)); res = await postWebhook(GAMEFEED_WEBHOOK, { embeds: m, allowed_mentions: { parse: [] } }); }
+    const res = await postWebhookRetry(GAMEFEED_WEBHOOK, { embeds: m, allowed_mentions: { parse: [] } });
     if (!res.ok) return { ok: false, error: res.error || `HTTP ${res.status}` };
   }
   return { ok: true };
 }
 
-// Every manual stat action (allowed, denied, or rejected) goes through here.
-function logStatAttempt(req, entry) {
-  const rec = {
-    timestamp: new Date().toISOString(),
-    ip: getClientIP(req),
-    userAgent: String(req.headers["user-agent"] || "").slice(0, 200),
-    ...entry,
-  };
-  state.statLog.unshift(rec);
-  if (state.statLog.length > STAT_LOG_MAX) state.statLog.length = STAT_LOG_MAX;
-  console.log("[RFL][STATLOG]", JSON.stringify(rec));
-  if (STATLOG_WEBHOOK) {
-    const icon = rec.outcome === "applied" ? "✅" : (rec.outcome === "denied" ? "🚫" : "⚠️");
-    const changes = (rec.changes || []).map(c => `• ${c.field}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join("\n") || "—";
-    postWebhook(STATLOG_WEBHOOK, { allowed_mentions: { parse: [] }, embeds: [{
-      title: `${icon} Stat edit ${rec.outcome}: ${rec.action || "?"}`,
-      description: `Who (claimed): **${rec.actor || "unknown"}**\nIP: ${rec.ip}\nGame: ${rec.gameId ?? "—"}\nPlayer: ${rec.player ?? "—"} (${rec.team || "—"})\nReason: ${rec.reason || rec.note || "—"}\n${changes}`.slice(0, 4000),
-      timestamp: rec.timestamp,
-    }] });
-  }
-  return rec;
-}
-
-// POST /rpl/standings/final — called by the game server when a game ends. Auth: RPL_SECRET.
-async function handleGameFinal(req, res) {
-  if (!SECRET) return sendJSON(res, 503, { error: "RPL_SECRET not configured on the server." });
+// POST /rpl/game/report — called by StatsReporter in the Roblox game when a game ends. Auth: Bearer RPL_SECRET.
+async function handleGameReport(req, res) {
+  if (!SECRET) return sendJSON(res, 503, { error: "RPL_SECRET is not set on the server." });
   if (!isAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
   let b;
   try { b = await readBody(req); } catch (e) { return sendJSON(res, 400, { error: "Bad JSON" }); }
 
-  const gameKey = sanitizeStr(String(b.gameKey ?? ""), 100);
+  const gameKey = sanitizeStr(String(b.gameId ?? ""), 100);
   const homeABB = sanitizeStr(b.homeABB, 8).toUpperCase();
   const awayABB = sanitizeStr(b.awayABB, 8).toUpperCase();
-  if (!gameKey) return sendJSON(res, 422, { error: "gameKey (unique per game) is required for send-once protection." });
-  if (!homeABB || !awayABB || homeABB === awayABB) return sendJSON(res, 422, { error: "Valid, different homeABB and awayABB required." });
+  if (!gameKey) return sendJSON(res, 422, { error: "gameId is required (used to make sure a game is only counted/sent once)." });
+  if (!homeABB || !awayABB || homeABB === awayABB) return sendJSON(res, 422, { error: `Need two different team abbreviations (got home="${homeABB}", away="${awayABB}").` });
   if (!Number.isFinite(Number(b.homeScore)) || !Number.isFinite(Number(b.awayScore))) return sendJSON(res, 422, { error: "homeScore and awayScore must be numbers." });
 
-  // Send-once: the same gameKey is never processed twice, even across restarts (persisted on the result).
+  // Send-once. The gameId is stored on the saved result, so this also holds across server restarts.
   const existing = state.results.find(r => r.gameKey === gameKey);
   if (existing) {
-    if (!existing.webhookSentAt && GAMEFEED_WEBHOOK) {          // saved earlier but Discord failed: retry, still only one success
+    if (!existing.webhookSentAt && GAMEFEED_WEBHOOK) { // saved earlier but Discord failed → retry; never double-counts standings
       const sent = await sendFinalToGameFeed(existing);
       if (sent.ok) { existing.webhookSentAt = new Date().toISOString(); await saveState(); }
       return sendJSON(res, 200, { ok: true, duplicate: true, webhookRetried: true, webhookSent: sent.ok });
@@ -961,38 +953,48 @@ async function handleGameFinal(req, res) {
     return sendJSON(res, 200, { ok: true, duplicate: true, webhookSent: !!existing.webhookSentAt });
   }
 
+  const isFinal = b.status === "final";
+  if (isFinal) {
+    // Don't invent teams from a typo — an unknown abbreviation must be fixed by an admin.
+    for (const abb of [homeABB, awayABB]) {
+      if (!state.teams[abb]) return sendJSON(res, 422, { error: `Unknown team abbreviation "${abb}" — it isn't in the standings. Add/fix it in the admin Teams tab, then add this game manually.` });
+    }
+  }
+
   const hs = Math.max(0, parseInt(b.homeScore, 10) || 0), as_ = Math.max(0, parseInt(b.awayScore, 10) || 0);
-  let status = b.status === "forfeit" ? "forfeit" : "final";
+  let status = isFinal ? "final" : "incomplete";
   if (status === "final" && hs === as_) status = "tie";
-  const cleanStats = a => (Array.isArray(a) ? a : []).slice(0, 60).map(p => {
-    const o = { name: sanitizeStr(p && p.name, 40) || "?" };
-    for (const f of STAT_FIELDS) o[f] = Math.max(0, parseInt(p && p[f], 10) || 0);
-    return o;
+
+  const cleanPlayers = side => (Array.isArray(b.players) ? b.players : []).filter(p => p && p.side === side).slice(0, 80).map(p => {
+    const stats = {};
+    for (const k of FB_KEYS) {
+      let v = parseInt(p.stats && p.stats[k], 10);
+      if (!Number.isFinite(v)) v = 0;
+      stats[k] = YARD_KEYS.has(k) ? Math.max(-9999, Math.min(9999, v)) : Math.max(0, Math.min(9999, v));
+    }
+    return { name: sanitizeStr(p.name, 40) || "?", userId: Number.isFinite(Number(p.userId)) ? Number(p.userId) : null, stats };
   });
 
-  ensureTeam(homeABB); ensureTeam(awayABB);
   let winnerABB = null;
   if (status === "tie") recordTie(homeABB, awayABB);
-  else { winnerABB = hs > as_ ? homeABB : awayABB; updateRecord(winnerABB, winnerABB === homeABB ? awayABB : homeABB); }
+  else if (status === "final") { winnerABB = hs > as_ ? homeABB : awayABB; updateRecord(winnerABB, winnerABB === homeABB ? awayABB : homeABB); }
 
   const result = {
     id: Date.now(), gameKey, timestamp: new Date().toISOString(),
-    season: sanitizeStr(b.season, 40) || "Season 1", status,
-    quarter: sanitizeStr(b.quarter, 10) || "---", note: sanitizeStr(b.note, 200),
-    homeABB, awayABB, homeLogo: "", awayLogo: "", homeScore: hs, awayScore: as_, winnerABB,
-    playerOfGame: (b.playerOfGame && typeof b.playerOfGame === "object") ? { name: sanitizeStr(b.playerOfGame.name, 40), team: sanitizeStr(b.playerOfGame.team, 8).toUpperCase(), ...Object.fromEntries(["pts","ast","reb","stl","blk"].map(k => [k, parseInt(b.playerOfGame[k], 10) || 0])) } : null,
-    referees: sanitizeStr(b.referees, 200) || "None",
-    homeStats: cleanStats(b.homeStats), awayStats: cleanStats(b.awayStats),
+    season: "Season 1", status, quarter: sanitizeStr(b.quarter, 10) || "F", note: "",
+    homeABB, awayABB, homeName: sanitizeStr(b.homeName, 60), awayName: sanitizeStr(b.awayName, 60),
+    homeLogo: "", awayLogo: "", homeScore: hs, awayScore: as_, winnerABB,
+    endReason: sanitizeStr(b.endReason, 80), playerOfGame: null, referees: "None",
+    homeStats: cleanPlayers("home"), awayStats: cleanPlayers("away"),
     manualEntry: false, webhookSentAt: null,
   };
   state.results.unshift(result);
   if (state.results.length > RESULTS_MAX) state.results.length = RESULTS_MAX;
   state.lastUpdated = new Date().toISOString();
-  state.auditLog.unshift({ action: "auto_final", gameId: result.id, matchup: `${awayABB} @ ${homeABB}`, score: `${as_}–${hs}`, status, timestamp: state.lastUpdated });
+  state.auditLog.unshift({ action: "auto_" + status, gameId: result.id, matchup: `${awayABB} @ ${homeABB}`, score: `${as_}–${hs}`, status, timestamp: state.lastUpdated });
   if (state.auditLog.length > 200) state.auditLog.length = 200;
-  logRefActivity(result.referees, result.id, homeABB, awayABB, result.timestamp);
 
-  await saveState();                       // persist FIRST so a crash can never double-count the game
+  await saveState();                       // save FIRST so a crash can never double-count the game
   broadcast("standings", buildPublicPayload());
   broadcast("result", result);
 
@@ -1001,56 +1003,49 @@ async function handleGameFinal(req, res) {
     const sent = await sendFinalToGameFeed(result);
     if (sent.ok) { result.webhookSentAt = new Date().toISOString(); webhookSent = true; await saveState(); }
     else console.error("[RFL] game-feed webhook failed:", sent.error);
-  } else console.warn("[RFL] DISCORD_GAMEFEED_WEBHOOK not set — stats not sent to Discord.");
-  return sendJSON(res, 200, { ok: true, result, webhookSent });
+  } else console.warn("[RFL] DISCORD_GAMEFEED_WEBHOOK not set — final stats NOT sent to Discord.");
+  console.log(`[RFL] Game reported: ${awayABB} @ ${homeABB} ${as_}-${hs} (${status}) gameId=${gameKey} webhook=${webhookSent}`);
+  return sendJSON(res, 200, { ok: true, status, webhookSent });
 }
 
-// POST /rpl/standings/stats/edit — admin manual stat edit. Body: { gameId, team, player, action: "edit"|"add"|"remove", changes:{pts:12,...}, actor, reason }
-async function handleStatEdit(req, res) {
-  let b = {};
-  try { b = await readBody(req); } catch (_) { /* logged below */ }
-  const base = { action: sanitizeStr(String(b.action || ""), 10), actor: sanitizeStr(b.actor, 60), gameId: b.gameId ?? null,
-                 player: sanitizeStr(b.player, 40), team: sanitizeStr(b.team, 8).toUpperCase(), reason: sanitizeStr(b.reason, 200),
-                 requested: b.changes && typeof b.changes === "object" ? b.changes : null };
-  if (!isAdminAuthorized(req)) {
-    logStatAttempt(req, { ...base, outcome: "denied", note: "Invalid or missing admin credentials" });
-    await saveState();
-    return sendJSON(res, 401, { error: "Unauthorized" });
-  }
-  const fail = async (code, msg) => { logStatAttempt(req, { ...base, outcome: "rejected", note: msg }); await saveState(); return sendJSON(res, code, { error: msg }); };
-  if (!["edit","add","remove"].includes(base.action)) return fail(422, "action must be edit, add or remove");
-  if (!base.actor) return fail(422, "actor (who is making the change) is required");
-  if (!base.player || !base.team) return fail(422, "player and team are required");
-  const result = state.results.find(r => r.id === b.gameId);
-  if (!result) return fail(404, "Game not found");
-  const side = base.team === result.homeABB ? "homeStats" : (base.team === result.awayABB ? "awayStats" : null);
-  if (!side) return fail(422, "team is not in this game");
-
-  const list = result[side];
-  const idx = list.findIndex(p => p.name === base.player);
-  const changes = [];
-  if (base.action === "add") {
-    if (idx !== -1) return fail(409, "Player already has a stat line in this game");
-    const line = { name: base.player };
-    for (const f of STAT_FIELDS) { line[f] = Math.max(0, parseInt((base.requested || {})[f], 10) || 0); changes.push({ field: f, from: null, to: line[f] }); }
-    list.push(line);
-  } else if (idx === -1) return fail(404, "Player has no stat line in this game");
-  else if (base.action === "remove") {
-    for (const f of STAT_FIELDS) changes.push({ field: f, from: list[idx][f] ?? 0, to: null });
-    list.splice(idx, 1);
-  } else {
-    if (!base.requested) return fail(422, "changes object required");
-    for (const [f, v] of Object.entries(base.requested)) {
-      if (!STAT_FIELDS.includes(f)) return fail(422, `Unknown stat field: ${f}`);
-      const nv = Math.max(0, parseInt(v, 10) || 0), ov = list[idx][f] ?? 0;
-      if (nv !== ov) { changes.push({ field: f, from: ov, to: nv }); list[idx][f] = nv; }
+// POST /rpl/game/statlog — the Roblox game reports EVERY manual stat edit / attempt here. Auth: Bearer RPL_SECRET.
+async function handleStatLogPost(req, res) {
+  if (!SECRET) return sendJSON(res, 503, { error: "RPL_SECRET is not set on the server." });
+  if (!isAuthorized(req)) return sendJSON(res, 401, { error: "Unauthorized" });
+  let b;
+  try { b = await readBody(req); } catch (e) { return sendJSON(res, 400, { error: "Bad JSON" }); }
+  const entries = (Array.isArray(b.entries) ? b.entries : [b]).slice(0, 50);
+  let n = 0;
+  for (const e of entries) {
+    if (!e || typeof e !== "object") continue;
+    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const rec = {
+      receivedAt: new Date().toISOString(),
+      time: sanitizeStr(e.time, 40) || null,                 // when it happened in the game server (ISO, UTC)
+      gameId: sanitizeStr(String(e.gameId ?? ""), 100) || null,
+      outcome: ["applied","denied","rejected"].includes(e.outcome) ? e.outcome : "unknown",
+      action: sanitizeStr(e.action, 20),                     // edit | play | undo | ...
+      actorName: sanitizeStr(e.actorName, 40), actorUserId: num(e.actorUserId),
+      playerName: sanitizeStr(e.playerName, 40), playerUserId: num(e.playerUserId), team: sanitizeStr(e.team, 60),
+      stat: sanitizeStr(e.stat, 20), from: num(e.from), to: num(e.to),
+      detail: sanitizeStr(e.detail, 300),
+    };
+    state.statLog.unshift(rec); n++;
+    console.log("[RFL][STATLOG]", JSON.stringify(rec));
+    if (STATLOG_WEBHOOK) {
+      const icon = rec.outcome === "applied" ? "✅" : (rec.outcome === "denied" ? "🚫" : "⚠️");
+      const change = rec.stat ? `${rec.stat}: ${rec.from ?? "—"} → ${rec.to ?? "—"}` : "—";
+      postWebhook(STATLOG_WEBHOOK, { allowed_mentions: { parse: [] }, embeds: [{
+        title: `${icon} Stat ${rec.action || "change"} — ${rec.outcome}`,
+        description: [`**By:** ${rec.actorName || "?"} (${rec.actorUserId ?? "?"})`, `**Player affected:** ${rec.playerName || "—"} (${rec.playerUserId ?? "—"}) · ${rec.team || "—"}`,
+          `**Change:** ${change}`, rec.detail ? `**Detail:** ${rec.detail}` : null, `**Game:** ${rec.gameId || "—"}`].filter(Boolean).join("\n"),
+        timestamp: rec.time || rec.receivedAt,
+      }] });
     }
   }
-  state.lastUpdated = new Date().toISOString();
-  logStatAttempt(req, { ...base, outcome: "applied", changes });
+  if (state.statLog.length > STAT_LOG_MAX) state.statLog.length = STAT_LOG_MAX;
   await saveState();
-  broadcast("standings", buildPublicPayload());
-  return sendJSON(res, 200, { ok: true, changes });
+  return sendJSON(res, 200, { ok: true, logged: n });
 }
 
 function handleGetStatLog(req, res) {
@@ -1076,8 +1071,8 @@ const server = http.createServer(async (req, res) => {
   }
   if (url === "/rpl/standings/events"   && method === "GET")  return handleSSE(req, res);
   if (url === "/rpl/standings/auth"     && method === "POST") return handleAuth(req, res);
-  if (url === "/rpl/standings/final"    && method === "POST") return handleGameFinal(req, res);
-  if (url === "/rpl/standings/stats/edit" && method === "POST") return handleStatEdit(req, res);
+  if (url === "/rpl/game/report"        && method === "POST") return handleGameReport(req, res);
+  if (url === "/rpl/game/statlog"       && method === "POST") return handleStatLogPost(req, res);
   if (url === "/rpl/standings/statlog"  && method === "GET")  return handleGetStatLog(req, res);
   if (url === "/rpl/standings/void"     && method === "POST") return handleVoidResult(req, res);
   if (url === "/rpl/standings/remove"   && method === "POST") return handleRemoveResult(req, res);

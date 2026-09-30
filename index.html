@@ -1673,12 +1673,21 @@ function openModal(g){
     `<div class="icard"><div class="ilbl">⭐ Player of the Game</div><p class="refs-na">Not available</p></div>`;
   const rf=(g.referees&&g.referees!=='')?g.referees:null;
   const rH=`<div class="icard"><div class="ilbl">📋 Referee(s)</div>${rf?`<div class="refs-txt">${rf}</div>`:'<p class="refs-na">Not listed</p>'}</div>`;
+  const FB=[['Passing',[['Comp','CMP'],['Att','ATT'],['PassYds','YDS'],['PassTD','TD'],['INT','INT']]],
+    ['Rushing',[['RushAtt','ATT'],['RushYds','YDS'],['RushTD','TD']]],
+    ['Receiving',[['Rec','REC'],['RecYds','YDS'],['RecTD','TD']]],
+    ['Defense',[['Tackles','TKL'],['Sacks','SCK'],['DefINT','INT'],['PBU','PBU'],['FF','FF']]],
+    ['Misc',[['Fumbles','FUM']]]];
+  const esc=v=>String(v??'?').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const bsTbl=stats=>{
     if(!stats?.length)return`<p class="bsnone">No player stats recorded</p>`;
-    return`<div class="bstbl-wrap"><table class="bstbl">
-      <thead><tr><th>Player</th><th>PTS</th><th>AST</th><th>REB</th><th>STL</th><th>BLK</th><th>FGM</th><th>FGA</th><th>FG%</th><th>FTM</th><th>FTA</th><th>3PM</th><th>3PA</th><th>TO</th><th>PF</th><th>GRD</th></tr></thead>
-      <tbody>${stats.map(p=>{const fg=p.fga>0?Math.round(p.fgm/p.fga*100):0;return`<tr><td>${p.name||'?'}</td><td class="pts">${p.pts??0}</td><td>${p.ast??0}</td><td>${p.reb??0}</td><td>${p.stl??0}</td><td>${p.blk??0}</td><td>${p.fgm??0}</td><td>${p.fga??0}</td><td>${fg}%</td><td>${p.ftm??0}</td><td>${p.fta??0}</td><td>${p.threeM??0}</td><td>${p.threeA??0}</td><td>${p.to??0}</td><td>${p.pf??0}</td><td>${p.grade??0}</td></tr>`}).join('')}
-      </tbody></table></div>`;
+    return FB.map(([grp,cols])=>{
+      const rows=stats.filter(p=>cols.some(([k])=>(p.stats?.[k]||0)!==0));
+      if(!rows.length)return'';
+      return`<div class="bstbl-wrap"><table class="bstbl">
+        <thead><tr><th>${grp}</th>${cols.map(([,l])=>`<th>${l}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(p=>`<tr><td>${esc(p.name)}</td>${cols.map(([k])=>`<td>${p.stats?.[k]||0}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }).join('')||`<p class="bsnone">No player stats recorded</p>`;
   };
   document.getElementById('m-body').innerHTML=`
     <div class="minfo">${pH}${rH}</div>
