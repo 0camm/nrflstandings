@@ -425,7 +425,7 @@ function handleAuth(req, res) {
 
 function handleAutoReportDisabled(req, res) {
   return sendJSON(res, 410, {
-    error: "Automatic score reporting has been disabled for RFL Season 1. Use the admin panel to add games manually.",
+    error: "Automatic score reporting has been disabled for NRFL Season 1. Use the admin panel to add games manually.",
   });
 }
 
